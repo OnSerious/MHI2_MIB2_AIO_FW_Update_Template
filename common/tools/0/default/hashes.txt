@@ -5,8 +5,8 @@
 ###########################################################################
 
 FileName = "ExceptionList.txt"
-FileSize = "695"
-CheckSum = "57e9e0a543f4f0aa80e48eb1c8de2500cbd8cba6"
+FileSize = "670"
+CheckSum = "c76f73253db20b23f353f6efec71548abce912b1"
 
 FileName = "finalScript.sh"
 FileSize = "369"
