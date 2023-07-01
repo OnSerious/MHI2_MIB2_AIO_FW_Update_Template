@@ -1,0 +1,422 @@
+#!/bin/sh
+
+revision="MIB2 subwoofer control enabler v0.3.2 (2023-06-11 by Mib-Wiki)"
+# use --help for more info
+# Thanks a lot for brucemiranda starting this topic and NumberOneBot for analyzing these datasets
+# https://github.com/Mr-MIBonk/M.I.B._More-Incredible-Bash/issues/99
+# https://github.com/NumberOneBot/mqb-mib2-sound-datasets
+# https://mqb-blog.com/en/2022/02/21/sound-dataset/
+
+export PATH=:/proc/boot:/sbin:/bin:/usr/bin:/usr/sbin:/net/mmx/bin:/net/mmx/usr/bin:/net/mmx/usr/sbin:/net/mmx/sbin:/net/mmx/mnt/app/armle/bin:/net/mmx/mnt/app/armle/sbin:/net/mmx/mnt/app/armle/usr/bin:/net/mmx/mnt/app/armle/usr/sbin
+export LD_LIBRARY_PATH=/net/mmx/mnt/app/root/lib-target:/net/mmx/mnt/eso/lib:/net/mmx/eso/lib:/net/mmx/mnt/app/usr/lib:/net/mmx/mnt/app/armle/lib:/net/mmx/mnt/app/armle/lib/dll:/net/mmx/mnt/app/armle/usr/lib
+export IPL_CONFIG_DIR=/etc/eso/production
+
+thisname="$(basename $0)"
+thisdir="$(dirname $0)"
+
+if [ -z $LOG ]; then
+	. $thisdir/../config/GLOBALS
+	echo -ne "\n$ME-$thisname---->\n" >> $LOG
+fi
+
+DSEDIT()
+{
+# <STRING> <BYTEOFFSET> <HEXVALUE> of changed byte"
+if [ ! -z $1 2>/dev/null ]; then
+	echo -ne "Input dataset:\n"$1"\n\n" >> $LOG
+	DS=$1
+	POSITION=$2
+	HEXVALUE=$3
+	echo -ne "Position->"$POSITION" - HEX-Value->"$HEXVALUE"\n\n" >> $LOG
+	if [ ${#HEXVALUE} -eq 2 ] ; then # checks for length of input hex value - must be 2 like "01"
+		HEXVALUE=$(echo $HEXVALUE | awk '{print tolower($0)}') # convert to lower-case
+		LENGTH=${#DS}
+		LENGTH=$(echo $LENGTH -2 | $BC) # adjust LENGTH for HEXVALUE that will be replaced
+		POSITION=$(echo $POSITION *2 | $BC)
+		if [ $POSITION -le $LENGTH ] && [ $(( $POSITION % 2 )) -eq 0 ]; then # -le -> is less than or equal to
+			if [ $POSITION -ge "2" ]; then
+				PRI=$(echo $DS | cut -c1-$POSITION)
+			else
+				PRI=""
+			fi
+			if [ $POSITION -ne $LENGTH ]; then # is not equal to
+				POSITION=$(echo $POSITION +3 | $BC)
+				SEC=$(echo $DS | cut -c$POSITION-$(echo $LENGTH +2 | $BC))
+			else
+				SEC=""
+			fi
+			DSPATCH=$PRI$HEXVALUE$SEC
+			echo -ne "Patched dataset:\n"$DSPATCH"\n\n" >> $LOG
+		else
+			echo -ne "Invalid position\n\n"
+		fi
+	else	
+		echo -ne "Value must be provided as hex value\n\n" | $TEE -a $LOG
+	fi
+else
+	echo -ne "No dataset provided\n\n" | $TEE -a $LOG
+fi
+
+}
+
+BACKUP()
+{
+	echo -ne "\nREAD sound datasets ---\n" | $TEE -i -a $LOG
+	DS3000="$(on -f mmx /eso/bin/dumb_persistence_reader 0 3221422100)" #0x3000
+	DS3B00="$(on -f mmx /eso/bin/dumb_persistence_reader 0 3221422112)" #0x3B00
+	DS3000_6=$($PC b:0:3221422100:6) #0x3000 Byte hex 06
+	DS3000_31=$($PC b:0:3221422100:31) #0x3000 Byte hex 1F
+	DS3000_684=$($PC b:0:3221422100:684) #0x3000 Byte 684
+
+	echo -ne "Backup 0x3B00............" | $TEE -i -a $LOG
+	if [ ! -f $NAND/0x3B00 ]; then
+		echo $DS3B00 > $NAND/0x3B00 2>> $LOG
+		echo $DS3B00 > $BACKUPFOLDER/0x3B00 2>> $LOG
+		ERROR
+		sleep 1
+	else
+		echo -ne " -> Backup is already there!\n" | $TEE -i -a $LOG
+	fi
+
+	echo -ne "Backup 0x3000............" | $TEE -i -a $LOG
+	if [ ! -f $NAND/0x3000 ] || [ ! -f $NAND/0x3000_684 ]; then
+		echo $DS3000 > $NAND/0x3000 2>> $LOG
+		echo $DS3000 > $BACKUPFOLDER/0x3000 2>> $LOG
+		echo $DS3000_684 > $NAND/0x3000_684 2>> $LOG
+		echo $DS3000 > $BACKUPFOLDER/0x3000_684 2>> $LOG
+		ERROR
+		sleep 1
+	else
+		echo -ne " -> Backup is already there!\n" | $TEE -i -a $LOG
+	fi
+}
+
+ADDCRC()
+# <STRING>
+{
+. $thisdir/crc16 $1
+crcsum=$(echo $crcsum | awk '{print tolower($0)}') # convert to lower-case
+DSPATCH=$1$crcsum
+}
+
+ADDGAIN()
+# <Original Gain> <Gain to add> | Output hex value of new gain
+{
+# Gain 4db = hex 32 = dec 50 / 12.5 = 4
+# 2db = 25 decimal = 19 hex
+# echo $(echo "ibase=16; 19" | $BC) = 25 decimal
+# echo $(echo "obase=16; 25" | $BC) = 0x19 hex
+# echo $(echo "ibase=16;19+19" | bc) = 19hex + 19hex =50
+# print $((16#19 + 16#19)) 19hex + 19hex = 50 decimal
+# echo $(echo "2*12.5" | bc)
+
+#echo -ne "$1\n"
+#echo -ne "$2\n"
+
+if [ $(( $2 % 2 )) -eq 0 ] || [ $2 = 0 ]; then
+	GAIN=$(echo "ibase=16;$1" | $BC)
+	GAINADD=$(echo "$2*12.5" | $BC)
+	#echo -ne "Input gain is $GAIN db\nGain to add is $GAINADD in decimal\n"
+	NEWGAIN=$(echo "$GAINADD+$GAIN" | $BC)
+	#echo -ne "$NEWGAIN\n"
+	NEWGAIN=$(echo "obase=16;$NEWGAIN" | $BC)
+	#echo -ne "$NEWGAIN\n"
+else
+	echo -ne "Gain must be multiple of 2\n" | $TEE -a $LOG
+	exit 2> /dev/null
+fi
+
+}
+
+if [ -f $TMP/reboot.mib ]; then
+	echo "Reboot running..."
+	return 2> /dev/null
+fi
+
+if [[ "$TRAINVERSION" = *AU* ]] || [[ "$TRAINVERSION" = *SK* ]] || [[ "$TRAINVERSION" = *VW* ]] || [[ "$TRAINVERSION" = *SE* ]]; then
+	VALUE=$1
+else
+	VALUE="-stop"
+	echo -ne "Brand not supported\nPorsche & Bentley are not (yet) supported\n" | $TEE -a $LOG
+	return 2> /dev/null
+fi
+
+AMP="$($PC i:0:0x50182CFF)" # long coding byte 11
+echo -ne "Long coding byte 11:\n$AMP\n" | $TEE -a $LOG
+# echo -ne "$(on -f mmx /eso/bin/dumb_persistence_reader 0 4101)\n" # longcoding output for debugging
+
+if [ "$AMP" = 1 ]; then
+	echo -ne "Internal sound system coding found!\n" | $TEE -a $LOG
+	SOUND="$($PC b:0:3221422100:0)" # 0x3000 byte 00 - type of sound system
+	echo -ne "Sound system in 0x3000 byte 00 coding:\n$SOUND\n" | $TEE -a $LOG
+	if [ $SOUND -ge 30 ]; then
+		echo -ne "Sound system is supported\n\n" | $TEE -a $LOG
+	else
+		echo -ne "Sound system is not supported\n" | $TEE -a $LOG
+		sleep 2
+		return 2> /dev/null
+	fi
+else
+	echo -ne "External sound system coding found!\nWe will stop here, as this patch can only be applied to units with 5F internal sound system\n" | $TEE -a $LOG
+	sleep 2
+	return 2> /dev/null
+fi
+
+
+	case $VALUE in
+
+	-subgain) {
+# <Gain to add> in 2dB steps
+# ---- 0x3000 ----------------------------------------------------------------------
+# byte 2AC 684
+
+trap '' 2
+
+	BACKUP
+	
+	echo -ne "0x3000 dataset found on unit:\n$DS3000\n\n" >> $LOG
+	LENGTH=${#DS3000} # Length DS with crc
+	LENGTH=$(echo $LENGTH -4 | $BC) # DS length without crc
+	DS3000=$(echo $DS3000 | cut -c1-$LENGTH) # DS with crc bytes removed
+	echo -ne "0x3000 dataset without crc:\n$DS3000\n\n" >> $LOG
+	
+	#SUBGAIN="$($PC b:0:3221422100:684)" # 0x3000 byte 00 - type of sound system
+	SUBGAIN=$DS3000_684
+	#echo -ne "Gain found in dataset $SUBGAIN in hex\n"
+	SUBGAINDEC="$(echo "ibase=16; $SUBGAIN" | $BC)"
+	SUBGAINDEC="$(echo "$SUBGAINDEC/12.5" | $BC)"
+	echo -ne "Subwoofer gain dataset $SUBGAINDEC dB\n" | $TEE -i -a $LOG
+	echo -ne "Subwoofer gain increase $2 dB\n" | $TEE -i -a $LOG
+	
+	echo -ne "ADD gain to dataset ---\n"
+	ADDGAIN $SUBGAIN $2
+	#echo -ne "New subwoofer gain $NEWGAIN in hex\n"
+	SUBGAINDEC="$(echo "ibase=16; $NEWGAIN" | $BC)"
+	SUBGAINDEC="$(echo "$SUBGAINDEC/12.5" | $BC)"
+	echo -ne "New subwoofer gain $SUBGAINDEC dB\n\n" | $TEE -i -a $LOG
+
+	DS3000_684_ORIG=$(cat $NAND/0x3000_684)
+	ORIGDEC="$(echo "ibase=16; $DS3000_684_ORIG" | $BC)"
+	ORIGDEC="$(echo "$SUBGAINDEC/12.5" | $BC)"
+	DIFF="$(echo "$SUBGAINDEC-$ORIGDEC" | $BC)"
+	if [ $DIFF -le 8 ]; then # is less than or equal to
+		echo -ne "Continue subwoofer gain increase\n"
+	else
+		echo -ne "Subwoofer gain increase to stock value is bigger than +8dB\nWill stop here\n"
+		sleep 2
+		exit 2> /dev/null
+	fi
+
+	echo -ne "\nCreate new dataset ---\n"
+	DSEDIT $DS3000 684 $NEWGAIN # set center range for subwoofer knob
+	DS3000=$DSPATCH
+	echo -ne "Patched dataset:\n"$DSPATCH"\n\n" >> $LOG
+
+	echo -ne "--------------------------- CRC ---------------------------\n"
+	echo -ne "Calculating CRC will take about 2 minutes NOW\nPlease stay patient!\nNext output will only be visible after calculation has finished!\n" | $TEE -a $LOG
+	ADDCRC $DS3000
+	echo -ne "-------------------------- DONE ---------------------------\n"
+	DS3000=$DSPATCH
+	echo -ne "Patched dataset with CRC:\n"$DS3000"\n\n" >> $LOG
+
+	echo -ne "Write dataset 0x3000 to unit\n" | $TEE -a $LOG
+	$PC b:0:3221422100 $DS3000 2>> $LOG
+	sleep 1
+	$PC b:0:1 0 2>> $LOG
+	echo -ne "Dataset on unit:\n"$(on -f mmx /eso/bin/dumb_persistence_reader 0 3221422100)"\n\n" >> $LOG
+	echo -ne "DONE\n\n" | $TEE -a $LOG
+
+trap 2
+
+. $thisdir/reboot -t 10
+
+return 2> /dev/null
+
+};;
+
+	-subon) {
+
+trap '' 2
+
+BACKUP
+
+[ -z "$GEM" ] && echo -ne "\033[36m"
+echo -ne "Install SUBWOOFER dataset\n" | $TEE -a $LOG
+[ -z "$GEM" ] && echo -ne "\033[m"
+
+# ---- 0x3B00 ----------------------------------------------------------------------
+
+	echo -ne "0x3B00 dataset found on unit:\n$DS3B00\n\n" >> $LOG
+
+	LENGTH=${#DS3B00} # Length DS with crc
+	LENGTH=$(echo $LENGTH -4 | $BC) # DS length without crc
+	DS3B00=$(echo $DS3B00 | cut -c1-$LENGTH) # DS with crc bytes removed
+	echo -ne "0x3B00 dataset without crc:\n$DS3B00\n\n" >> $LOG
+
+	echo -ne "--- set min    range for subwoofer knob\n" | $TEE -i -a $LOG
+	# hex value converted into decimal will provide the number of steps for -/+ range on knob
+	sleep 1
+	DSEDIT $DS3B00 24 F7 # set min    range for subwoofer knob
+	DS3B00=$DSPATCH
+	echo -ne "--- set center range for subwoofer knob\n" | $TEE -i -a $LOG
+	sleep 1
+	DSEDIT $DS3B00 25 00 # set center range for subwoofer knob
+	DS3B00=$DSPATCH
+	echo -ne "--- set max    range for subwoofer knob\n" | $TEE -i -a $LOG
+	sleep 1
+	DSEDIT $DS3B00 26 09 # set max    range for subwoofer knob
+	DS3B00=$DSPATCH
+	if [[ "$TRAINVERSION" = *VW* ]] || [[ "$TRAINVERSION" = *SK* ]] || [[ "$TRAINVERSION" = *SE* ]]; then
+		echo -ne "--- enable clicks\n" 2>> $LOG
+		DSEDIT $DS3B00 27 01 # enable clicks
+		DS3B00=$DSPATCH
+	fi
+
+	if [[ "$TRAINVERSION" = *AU* ]]; then
+		echo -ne "--- enable 2 EQ dials\n" | $TEE -i -a $LOG
+		sleep 1
+		DSEDIT $DS3B00 28 02 # enable 2 EQ dials - trebble/bass - Max display for Audi
+		DS3B00=$DSPATCH
+	elif [[ "$TRAINVERSION" = *VW* ]] || [[ "$TRAINVERSION" = *SK* ]]; then
+		echo -ne "--- enable 3 EQ dials\n" | $TEE -i -a $LOG
+		sleep 1
+		DSEDIT $DS3B00 28 03 # enable 3 EQ dials - trebble/middle/bass
+		DS3B00=$DSPATCH
+	elif [[ "$TRAINVERSION" = *SE* ]]; then
+		echo -ne "--- enable 5 EQ dials\n" | $TEE -i -a $LOG
+		sleep 1
+		DSEDIT $DS3B00 28 05 # enable 5 EQ dials - trebble/midtrebble/middle/midbass/bass
+		DS3B00=$DSPATCH
+	else
+		echo -ne "no brand match\nByte will not be changed\n" | $TEE -a $LOG
+	fi
+	# DS3B00=$(DSEDIT $DS3B00 30 01) # FocusEffect1 - 1st sound effect 
+	# DS3B00=$(DSEDIT $DS3B00 31 01) # FocusEffect2 - 2nd sound effect 
+
+	echo -ne "\nPatched dataset:\n"$DS3B00"\n\n" >> $LOG
+
+	echo -ne "--------------------------- CRC ---------------------------\n"
+	echo -ne "Calculating CRC will take about 20 seconds NOW\nPlease stay patient!\nNext output will only be visible after calculation has finished!\n" | $TEE -a $LOG
+	ADDCRC $DS3B00
+	echo -ne "-------------------------- DONE ---------------------------\n"
+	DS3B00=$DSPATCH
+	echo -ne "Patched dataset with CRC:\n"$DS3B00"\n\n" >> $LOG
+	
+	echo -ne "Write dataset 0x3B00 to unit\n" | $TEE -a $LOG
+	$PC b:0:3221422112 $DS3B00 2>> $LOG
+	$PC b:0:1 0 2>> $LOG
+	echo -ne "Dataset on unit:\n"$($PERSR 0 3221422112)"\n\n" >> $LOG
+	echo -ne "DONE\n\n" | $TEE -a $LOG
+
+# ---- 0x3000  ----------------------------------------------------------------------
+
+	echo -ne "0x3000 dataset found on unit:\n$DS3000\n\n" >> $LOG
+
+	LENGTH=${#DS3000} # Length DS with crc
+	LENGTH=$(echo $LENGTH -4 | $BC) # DS length without crc
+	DS3000=$(echo $DS3000 | cut -c1-$LENGTH) # DS with crc bytes removed
+	echo -ne "0x3000 dataset without crc:\n$DS3000\n\n" >> $LOG
+
+	echo -ne "--- set subwoofer max gain\n" 2>> $LOG
+	sleep 1
+	if [ ! $DS3000_31 = $DS3000_6 ]; then
+		DSEDIT $DS3000 31 $DS3000_6 # set subwoofer max gain
+		DS3000=$DSPATCH
+		echo -ne "Patched dataset:\n"$DS3000"\n\n" >> $LOG
+		
+		echo -ne "--------------------------- CRC ---------------------------\n"
+		echo -ne "Calculating CRC will take about 2 minutes NOW\nPlease stay patient!\nNext output will only be visible after calculation has finished!\n" | $TEE -a $LOG
+		ADDCRC $DS3000
+		echo -ne "-------------------------- DONE ---------------------------\n"
+		DS3000=$DSPATCH
+		echo -ne "Patched dataset with CRC:\n"$DS3000"\n\n" >> $LOG
+
+		echo -ne "Write dataset 0x3000 to unit\n" | $TEE -a $LOG
+		$PC b:0:3221422100 $DS3000 2>> $LOG
+		$PC b:0:1 0 2>> $LOG
+		echo -ne "Dataset on unit:\n"$(PERSR 0 3221422100)"\n\n" >> $LOG
+		echo -ne "DONE\n\n" | $TEE -a $LOG
+	else
+		echo -ne "Subwoofer gain already coded\nNo need to change it\n\n" | $TEE -a $LOG
+	fi
+
+trap 2
+
+. $thisdir/reboot -t 10
+
+return 2> /dev/null
+
+};;
+
+	-suboff) {
+
+trap '' 2
+
+[ -z "$GEM" ] && echo -ne "\033[36m"
+echo -ne "Install ORIGINAL dataset\n" | $TEE -a $LOG
+[ -z "$GEM" ] && echo -ne "\033[m"
+
+	echo -ne "Backup 0x3B00............" | $TEE -i -a $LOG
+	if [ -f $BACKUPFOLDER/0x3B00 ] && [ -f $BACKUPFOLDER/0x3000 ]; then
+		echo -ne "Dataset backups found\n" | $TEE -i -a $LOG
+		echo -ne "Write dataset 0x3B00 to unit\n" | $TEE -a $LOG
+		echo "Dataset on unit:\n$(on -f mmx /eso/bin/dumb_persistence_reader 0 3221422112)" >> $LOG
+		$PC b:0:3221422112 $(cat $BACKUPFOLDER/0x3B00) 2>> $LOG
+		$PC b:0:1 0 2>> $LOG
+		echo "Dataset restored to unit:\n$(on -f mmx /eso/bin/dumb_persistence_reader 0 3221422112)" >> $LOG
+		echo -ne "0x3B00 DONE\n\n" | $TEE -a $LOG
+		
+		echo -ne "Write dataset 0x3000 to unit\n" | $TEE -a $LOG
+		echo "Dataset on unit:\n$(on -f mmx /eso/bin/dumb_persistence_reader 0 3221422100)" >> $LOG
+		$PC b:0:3221422100 $(cat $BACKUPFOLDER/0x3000) 2>> $LOG | $TEE -i -a $LOG
+		$PC b:0:1 0 2>> $LOG
+		echo "Dataset restored to unit:\n$(on -f mmx /eso/bin/dumb_persistence_reader 0 3221422100)" >> $LOG
+		echo -ne "0x3000 DONE\n\n" | $TEE -a $LOG
+	else
+		echo -ne " -> Backup not found!\n" | $TEE -i -a $LOG
+	fi
+
+trap 2
+
+. $thisdir/reboot -t 10
+
+trap 2
+
+return 2> /dev/null
+
+};;
+
+
+	# help or unknown parameter ------------------------------
+	*) {
+		echo ""
+		echo $revision
+		echo ""
+		echo "Usage: "$thisname" [OPTION]"
+		echo ""
+		echo "Options:"
+		echo "        -subon 			Install SUBWOOFER patch"
+		echo "        -suboff 			Install ORIGINAL dataset (disable subwoofer control)"
+		echo "        -subgain <value> 	Add X dB to gain - max 8 dB"
+		echo "        --help			show this help"
+		echo ""
+		echo "This program is free software; you can redistribute it and/or"
+		echo "modify it under the terms of the GNU General Public License"
+		echo "as published by the Free Software Foundation; either version 2"
+		echo "of the License, or (at your option) any later version."
+		echo ""
+		echo "This program is distributed in the hope that it will be useful,"
+		echo "but WITHOUT ANY WARRANTY; without even the implied warranty of"
+		echo "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+		echo "See the GNU General Public License for more details."
+		echo ""
+		echo "You should have received a copy of the GNU General Public License"
+		echo "along with this program; if not, write to the Free Software Foundation,"
+		echo "Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA."
+		echo ""
+
+	};;
+
+	esac
+
+exit 0
